@@ -1,18 +1,15 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { 
   Calendar, 
-  Clock, 
   Plus, 
   Volume2, 
   Trash2, 
-  ShieldCheck, 
   Phone,
   User,
   CheckCircle,
   X,
   CalendarDays,
   List,
-  ExternalLink,
   Bell,
   Download,
   Upload,
@@ -139,7 +136,7 @@ export default function App() {
             setCopySuccess(true);
             speak("資料已複製，請貼上給新手機");
             setTimeout(() => setCopySuccess(false), 3000);
-        }).catch(err => {
+        }).catch(() => {
             alert("複製失敗，請嘗試長按選取文字後複製");
         });
     } else {
