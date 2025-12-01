@@ -14,7 +14,10 @@ import {
   LogOut,
   Cloud,
   Loader2,
-  AlertTriangle
+  AlertTriangle,
+  Share2,
+  CheckSquare,
+  Square
 } from 'lucide-react';
 
 // --- Firebase SDK ---
@@ -25,13 +28,14 @@ import {
   signInWithPopup, 
   signOut, 
   onAuthStateChanged, 
-  type User as FirebaseUser // 修正：加上 type 關鍵字
+  type User as FirebaseUser
 } from "firebase/auth";
 import { 
   getFirestore,
   collection, 
   addDoc, 
   deleteDoc, 
+  updateDoc, // 新增更新功能
   doc, 
   query, 
   where, 
@@ -55,7 +59,6 @@ const isConfigured = !firebaseConfig.apiKey.includes("請貼上");
 
 let auth: any, googleProvider: any, db: any;
 
-// 只有在已設定時才初始化 Firebase，避免報錯
 if (isConfigured) {
   try {
     const app = initializeApp(firebaseConfig);
@@ -84,7 +87,8 @@ interface Appointment {
   date: string; // YYYY-MM-DD
   time: string; // HH:MM
   type: ApptType;
-  uid?: string;  // 綁定使用者的 ID
+  uid?: string;
+  completed?: boolean; // 新增：完成狀態
 }
 
 export default function App() {
@@ -122,8 +126,7 @@ export default function App() {
       });
       return () => unsubscribe();
     } else {
-      // === 本機試用模式 (Demo Mode) ===
-      // 讀取 LocalStorage
+      // === 本機試用模式 ===
       const savedUser = localStorage.getItem('demo_user');
       const savedAppts = localStorage.getItem('demo_appointments');
       
@@ -152,7 +155,13 @@ export default function App() {
       querySnapshot.forEach((doc) => {
         list.push({ id: doc.id, ...doc.data() } as Appointment);
       });
-      list.sort((a, b) => new Date(`${a.date}T${a.time}`).getTime() - new Date(`${b.date}T${b.time}`).getTime());
+      // 排序：先比完成狀態(未完成在前)，再比日期時間
+      list.sort((a, b) => {
+        if (a.completed === b.completed) {
+          return new Date(`${a.date}T${a.time}`).getTime() - new Date(`${b.date}T${b.time}`).getTime();
+        }
+        return (a.completed ? 1 : -1);
+      });
       setAppointments(list);
       setIsDataLoading(false);
     }, (error) => {
@@ -171,13 +180,12 @@ export default function App() {
       } catch (error: any) {
         console.error(error);
         if (error.code === 'auth/network-request-failed') {
-          alert("連線失敗！請確認：\n1. 網路是否通暢\n2. 您的 Vercel 網址是否已加入 Firebase 的「Authorized Domains」(授權網域) 清單中？");
+          alert("連線失敗！請確認：\n1. 網路是否通暢\n2. 您的 Vercel 網址是否已加入 Firebase 的「Authorized Domains」清單中？");
         } else {
           alert(`登入失敗 (${error.code})，請檢查設定`);
         }
       }
     } else {
-      // 試用模式登入模擬
       const mockUser = { displayName: '測試爺爺', email: 'test@demo.com', uid: 'demo-user' };
       setUser(mockUser);
       localStorage.setItem('demo_user', JSON.stringify(mockUser));
@@ -223,6 +231,24 @@ export default function App() {
     window.open(url, '_blank');
   };
 
+  // --- Line 分享功能 (新功能) ---
+  const shareToLine = () => {
+    const todayList = appointments.filter(a => a.date === todayStr);
+    let message = `📅 【${user?.displayName || '長輩'}】的今日行程 (${todayStr})：\n`;
+    
+    if (todayList.length === 0) {
+      message += "今日沒有安排行程，好好休息喔！";
+    } else {
+      todayList.forEach((appt, index) => {
+        const status = appt.completed ? "(已完成✅)" : "";
+        message += `\n${index + 1}. ${appt.time} ${appt.title} ${status}`;
+      });
+    }
+    
+    const url = `https://line.me/R/msg/text/?${encodeURIComponent(message)}`;
+    window.open(url, '_blank');
+  };
+
   // --- 開啟新增視窗 ---
   const handleOpenAdd = () => {
     if (!user) {
@@ -252,12 +278,28 @@ export default function App() {
           await deleteDoc(doc(db, "appointments", id));
           speak("行程已刪除");
         } catch (e) {
-          alert("刪除失敗，請檢查網路");
+          alert("刪除失敗");
         }
       } else {
         setAppointments(prev => prev.filter(a => a.id !== id));
         speak("行程已刪除");
       }
+    }
+  };
+
+  // --- 切換完成狀態 (新功能) ---
+  const handleToggleComplete = async (appt: Appointment) => {
+    const newStatus = !appt.completed;
+    if (isConfigured && user) {
+      try {
+        await updateDoc(doc(db, "appointments", appt.id), { completed: newStatus });
+        speak(newStatus ? "太棒了，完成一項行程" : "已取消完成");
+      } catch (e) {
+        alert("更新失敗");
+      }
+    } else {
+      setAppointments(prev => prev.map(a => a.id === appt.id ? { ...a, completed: newStatus } : a));
+      speak(newStatus ? "太棒了，完成一項行程" : "已取消完成");
     }
   };
 
@@ -274,10 +316,10 @@ export default function App() {
       time: newTime,
       type: newType,
       uid: user.uid,
+      completed: false
     };
 
     if (isConfigured) {
-      // 雲端模式
       try {
         const docRef = await addDoc(collection(db, "appointments"), {
           ...newAppt,
@@ -293,7 +335,6 @@ export default function App() {
         alert("儲存失敗，請檢查網路");
       }
     } else {
-      // 試用模式
       const localAppt = { ...newAppt, id: Date.now().toString() };
       setAppointments([...appointments, localAppt]);
       setLastAddedAppt(localAppt);
@@ -304,8 +345,10 @@ export default function App() {
     }
   };
 
-  // --- UI 輔助功能 ---
-  const getCategoryTheme = (type: ApptType) => {
+  const getCategoryTheme = (type: ApptType, isCompleted?: boolean) => {
+    if (isCompleted) {
+      return { border: 'border-gray-300', text: 'text-gray-400', iconBg: 'bg-gray-100' };
+    }
     switch (type) {
       case 'medical': return { border: 'border-[#B7282E]', text: 'text-[#B7282E]', iconBg: 'bg-[#FDE8E9]' };
       case 'pills':   return { border: 'border-[#5654A2]', text: 'text-[#5654A2]', iconBg: 'bg-[#EFEEF8]' };
@@ -349,19 +392,26 @@ export default function App() {
   const tomorrowStr = tomorrow.toISOString().split('T')[0];
   
   const getFilteredAppointments = () => {
+    let list = [...appointments];
     if (filterMode === 'week') {
-      return appointments.filter(a => {
+      list = list.filter(a => {
         const d = new Date(a.date);
         const t = new Date(todayStr); 
         const nextWeek = new Date(); nextWeek.setDate(nextWeek.getDate() + 7);
         return d >= t && d <= nextWeek;
       });
     }
-    return appointments;
+    // 再次確保已完成的排在後面
+    return list.sort((a, b) => {
+      if (a.completed === b.completed) {
+        return new Date(`${a.date}T${a.time}`).getTime() - new Date(`${b.date}T${b.time}`).getTime();
+      }
+      return (a.completed ? 1 : -1);
+    });
   };
 
   const filteredList = getFilteredAppointments();
-  const todayCount = appointments.filter(a => a.date === todayStr).length;
+  const todayCount = appointments.filter(a => a.date === todayStr && !a.completed).length; // 只算未完成
   const tomorrowCount = appointments.filter(a => a.date === tomorrowStr).length;
 
   const formatDateFriendly = (dateStr: string) => {
@@ -371,7 +421,6 @@ export default function App() {
     return `${d.getMonth() + 1}/${d.getDate()} (${['日','一','二','三','四','五','六'][d.getDay()]})`;
   };
 
-  // --- 載入中畫面 ---
   if (isAuthLoading) {
     return (
       <div className="min-h-screen bg-[#F9F7F2] flex flex-col items-center justify-center space-y-4">
@@ -384,7 +433,6 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#F9F7F2] font-sans text-[#434343] pb-32 relative">
       
-      {/* --- 未設定 Firebase 的提示條 (Demo Mode) --- */}
       {!isConfigured && (
         <div className="bg-[#B7282E] text-white px-4 py-3 text-center text-lg font-bold flex items-center justify-center gap-2">
           <AlertTriangle size={24} />
@@ -392,7 +440,6 @@ export default function App() {
         </div>
       )}
 
-      {/* --- 成功引導彈窗 --- */}
       {showSuccessModal && lastAddedAppt && (
         <div className="fixed inset-0 z-[60] bg-[#434343]/80 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in">
           <div className="bg-white rounded-[2rem] p-8 w-full max-w-lg shadow-2xl flex flex-col items-center text-center space-y-8">
@@ -431,7 +478,6 @@ export default function App() {
         </div>
       )}
 
-      {/* --- 頂部導航 --- */}
       <header className="bg-[#C25D48] text-white p-6 shadow-md sticky top-0 z-10 flex justify-between items-center">
         <div className="flex items-center gap-3">
           <Calendar size={36} />
@@ -472,7 +518,6 @@ export default function App() {
         </div>
       </header>
 
-      {/* --- 主要內容區 --- */}
       <main className="p-4 max-w-3xl mx-auto space-y-8 mt-4">
         
         {view === 'settings' ? (
@@ -537,18 +582,25 @@ export default function App() {
           </div>
         ) : (
           <>
-            {/* --- 概況卡片區 --- */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="bg-white rounded-[2rem] p-8 shadow-sm border-l-[12px] border-[#C25D48] relative overflow-hidden">
                 <h2 className="text-2xl text-[#949495] font-bold mb-2">今天行程</h2>
                 <div className="flex items-baseline gap-3">
                   <span className="text-7xl font-bold text-[#C25D48]">{todayCount}</span>
-                  <span className="text-2xl text-[#6E6E70]">個事項</span>
+                  <span className="text-2xl text-[#6E6E70]">個待辦</span>
                 </div>
                 <div className="mt-6 flex items-center justify-between border-t border-[#EBEBEB] pt-4">
-                   <span className="text-2xl text-[#6E6E70] font-bold">{new Date().toLocaleDateString('zh-TW', {month:'numeric', day:'numeric', weekday:'long'})}</span>
+                   <div className="flex gap-2">
+                     <button 
+                        onClick={shareToLine} 
+                        className="p-3 bg-[#00B900] text-white rounded-full flex items-center gap-2 font-bold shadow-sm active:scale-95"
+                        title="傳給家人"
+                      >
+                        <Share2 size={24} /> 傳給家人
+                     </button>
+                   </div>
                    <button 
-                      onClick={() => speak(`今天有 ${todayCount} 個行程`)} 
+                      onClick={() => speak(`今天還有 ${todayCount} 個待辦事項`)} 
                       className="p-3 bg-[#F9E1E2] rounded-full text-[#C25D48]"
                     >
                       <Volume2 size={32} />
@@ -574,7 +626,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* --- 切換檢視模式 --- */}
             <div className="flex bg-[#EBEBEB] p-2 rounded-2xl">
               <button 
                 onClick={() => setFilterMode('week')}
@@ -594,7 +645,6 @@ export default function App() {
               </button>
             </div>
 
-            {/* --- 行程列表 --- */}
             <div className="space-y-6">
               {!user && (
                 <div className="bg-[#FEF8E0] p-6 rounded-2xl border-2 border-[#EFBB24] text-[#B08600] text-xl font-bold flex items-center gap-3 shadow-sm">
@@ -617,11 +667,11 @@ export default function App() {
                 </div>
               ) : (
                 filteredList.map((appt) => {
-                  const theme = getCategoryTheme(appt.type);
+                  const theme = getCategoryTheme(appt.type, appt.completed);
                   return (
                     <div 
                       key={appt.id} 
-                      className={`relative flex flex-col p-6 rounded-r-2xl rounded-l-lg shadow-sm bg-white border-l-[16px] ${theme.border} transition hover:shadow-md`}
+                      className={`relative flex flex-col p-6 rounded-r-2xl rounded-l-lg shadow-sm bg-white border-l-[16px] ${theme.border} transition hover:shadow-md ${appt.completed ? 'opacity-60 bg-gray-50' : ''}`}
                     >
                       <div className="flex justify-between items-start mb-4">
                         <div className="flex items-start gap-5">
@@ -630,37 +680,47 @@ export default function App() {
                           </div>
                           <div>
                             <div className="flex items-center gap-3 text-[#6E6E70] font-bold text-xl mb-2">
-                              <span className="bg-[#F9F7F2] px-3 py-1 rounded-lg text-[#C25D48]">{formatDateFriendly(appt.date)}</span>
-                              <span className="font-mono text-2xl text-[#434343]">{appt.time}</span>
+                              <span className={`px-3 py-1 rounded-lg ${appt.completed ? 'bg-gray-200' : 'bg-[#F9F7F2] text-[#C25D48]'}`}>{formatDateFriendly(appt.date)}</span>
+                              <span className={`font-mono text-2xl ${appt.completed ? 'text-gray-400 line-through' : 'text-[#434343]'}`}>{appt.time}</span>
                             </div>
-                            <h3 className={`text-3xl font-bold leading-tight ${theme.text}`}>
+                            <h3 className={`text-3xl font-bold leading-tight ${theme.text} ${appt.completed ? 'line-through' : ''}`}>
                               {appt.title}
                             </h3>
                           </div>
                         </div>
+                        
+                        {/* 打勾按鈕 */}
+                        <button 
+                          onClick={() => handleToggleComplete(appt)}
+                          className={`p-2 rounded-full transform transition active:scale-90 ${appt.completed ? 'text-gray-400' : 'text-[#007B43]'}`}
+                        >
+                          {appt.completed ? <CheckSquare size={48} /> : <Square size={48} />}
+                        </button>
                       </div>
                       
-                      <div className="flex justify-end gap-4 mt-2 pt-4 border-t border-[#F9F7F2]">
-                          <button
-                            onClick={() => openGoogleCalendar(appt)}
-                            className={`flex items-center gap-2 px-6 py-4 bg-[#F9F7F2] rounded-full font-bold active:bg-[#EBEBEB] transition ${theme.text}`}
-                          >
-                            <Bell size={24} /> <span className="text-xl">加提醒</span>
-                          </button>
+                      {!appt.completed && (
+                        <div className="flex justify-end gap-4 mt-2 pt-4 border-t border-[#F9F7F2]">
+                            <button
+                              onClick={() => openGoogleCalendar(appt)}
+                              className={`flex items-center gap-2 px-6 py-4 bg-[#F9F7F2] rounded-full font-bold active:bg-[#EBEBEB] transition ${theme.text}`}
+                            >
+                              <Bell size={24} /> <span className="text-xl">加提醒</span>
+                            </button>
 
-                          <button 
-                            onClick={() => speak(`${appt.title}，時間是${formatDateFriendly(appt.date)}，${appt.time}`)}
-                            className="flex items-center gap-2 px-6 py-4 bg-[#F9F7F2] rounded-full text-[#6E6E70] active:bg-[#EBEBEB]"
-                          >
-                            <Volume2 size={24} />
-                          </button>
-                          <button 
-                            onClick={() => handleDelete(appt.id, appt.title)}
-                            className="flex items-center gap-2 px-6 py-4 bg-[#F9F7F2] rounded-full text-[#B7282E] active:bg-[#EBEBEB]"
-                          >
-                            <Trash2 size={24} />
-                          </button>
-                      </div>
+                            <button 
+                              onClick={() => speak(`${appt.title}，時間是${formatDateFriendly(appt.date)}，${appt.time}`)}
+                              className="flex items-center gap-2 px-6 py-4 bg-[#F9F7F2] rounded-full text-[#6E6E70] active:bg-[#EBEBEB]"
+                            >
+                              <Volume2 size={24} />
+                            </button>
+                            <button 
+                              onClick={() => handleDelete(appt.id, appt.title)}
+                              className="flex items-center gap-2 px-6 py-4 bg-[#F9F7F2] rounded-full text-[#B7282E] active:bg-[#EBEBEB]"
+                            >
+                              <Trash2 size={24} />
+                            </button>
+                        </div>
+                      )}
                     </div>
                   );
                 })
@@ -671,7 +731,6 @@ export default function App() {
         )}
       </main>
 
-      {/* --- 底部懸浮按鈕 (超級加大版) --- */}
       <div className="fixed bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-[#F9F7F2] to-transparent pointer-events-none z-50">
         {!showAddModal && view === 'list' && (
           <button 
@@ -685,7 +744,6 @@ export default function App() {
         )}
       </div>
 
-      {/* --- 新增行程 Modal (放大版) --- */}
       {showAddModal && (
         <div className="fixed inset-0 bg-[#434343]/80 z-50 flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in">
           <div className="bg-white w-full max-w-2xl rounded-[2.5rem] shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
@@ -697,7 +755,6 @@ export default function App() {
             </div>
             
             <div className="p-8 overflow-y-auto space-y-8 bg-[#F9F7F2]">
-              {/* 類別選擇 */}
               <div>
                 <label className="block text-2xl font-bold text-[#6E6E70] mb-4">1. 這是什麼事？</label>
                 <div className="grid grid-cols-2 gap-4">
@@ -730,7 +787,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* 標題輸入 */}
               <div>
                 <label className="block text-2xl font-bold text-[#6E6E70] mb-3">2. 內容備註</label>
                 <input 
@@ -742,7 +798,6 @@ export default function App() {
                 />
               </div>
 
-              {/* 時間選擇 */}
               <div className="grid grid-cols-2 gap-6">
                 <div>
                   <label className="block text-2xl font-bold text-[#6E6E70] mb-3">3. 日期</label>
