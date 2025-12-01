@@ -41,12 +41,12 @@ import {
 // --- Firebase 設定區 ---
 // 重要：請將下方的字串替換為您在 Firebase Console 取得的真實金鑰
 const firebaseConfig = {
-  apiKey: "請貼上您的_apiKey",
-  authDomain: "請貼上您的_authDomain",
-  projectId: "請貼上您的_projectId",
-  storageBucket: "請貼上您的_storageBucket",
-  messagingSenderId: "請貼上您的_messagingSenderId",
-  appId: "請貼上您的_appId"
+  apiKey: "AIzaSyCWpf5kBsSiH9NiXPZ68BNo4wCtblej7FY",
+  authDomain: "senior-scheduler.firebaseapp.com",
+  projectId: "senior-scheduler",
+  storageBucket: "senior-scheduler.firebasestorage.app",
+  messagingSenderId: "953818573188",
+  appId: "1:953818573188:web:c29950ecb5b6e0075f95d1"
 };
 
 // 初始化 Firebase
