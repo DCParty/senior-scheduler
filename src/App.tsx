@@ -10,13 +10,50 @@ import {
   CalendarDays,
   List,
   Bell,
-  Download,
-  Upload,
-  Copy,
-  Check,
   LogIn,
-  LogOut
+  LogOut,
+  Cloud,
+  Loader2
 } from 'lucide-react';
+
+// --- Firebase SDK 引入 (已合併) ---
+import { initializeApp } from "firebase/app";
+import { 
+  getAuth, 
+  GoogleAuthProvider, 
+  signInWithPopup, 
+  signOut, 
+  onAuthStateChanged, 
+  User as FirebaseUser 
+} from "firebase/auth";
+import { 
+  getFirestore,
+  collection, 
+  addDoc, 
+  deleteDoc, 
+  doc, 
+  query, 
+  where, 
+  onSnapshot, 
+  Timestamp
+} from 'firebase/firestore';
+
+// --- Firebase 設定區 ---
+// 重要：請將下方的字串替換為您在 Firebase Console 取得的真實金鑰
+const firebaseConfig = {
+  apiKey: "請貼上您的_apiKey",
+  authDomain: "請貼上您的_authDomain",
+  projectId: "請貼上您的_projectId",
+  storageBucket: "請貼上您的_storageBucket",
+  messagingSenderId: "請貼上您的_messagingSenderId",
+  appId: "請貼上您的_appId"
+};
+
+// 初始化 Firebase
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const googleProvider = new GoogleAuthProvider();
+const db = getFirestore(app);
 
 // --- 定義行程類別 ---
 type ApptType = 
@@ -35,13 +72,7 @@ interface Appointment {
   date: string; // YYYY-MM-DD
   time: string; // HH:MM
   type: ApptType;
-}
-
-// 模擬使用者介面
-interface UserProfile {
-  name: string;
-  email: string;
-  avatar?: string;
+  uid: string;  // 綁定使用者的 ID
 }
 
 export default function App() {
@@ -52,13 +83,9 @@ export default function App() {
   const [lastAddedAppt, setLastAddedAppt] = useState<Appointment | null>(null);
   
   // 使用者登入狀態
-  const [user, setUser] = useState<UserProfile | null>(null);
-  const [isLoginLoading, setIsLoginLoading] = useState(false);
-
-  // 備份還原相關狀態
-  const [showBackupInput, setShowBackupInput] = useState(false);
-  const [backupString, setBackupString] = useState('');
-  const [copySuccess, setCopySuccess] = useState(false);
+  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(true); // 檢查登入狀態中
+  const [isDataLoading, setIsDataLoading] = useState(false); // 資料下載中
 
   const [view, setView] = useState<'list' | 'settings'>('list');
   const [filterMode, setFilterMode] = useState<'week' | 'all'>('week');
@@ -68,77 +95,109 @@ export default function App() {
   const [newTime, setNewTime] = useState('');
   const [newType, setNewType] = useState<ApptType>('other');
 
-  // --- 初始化 ---
+  // --- 初始化：監聽登入狀態 ---
   useEffect(() => {
-    const saved = localStorage.getItem('senior_appointments_v11');
-    const savedUser = localStorage.getItem('senior_user_profile');
-    
-    if (saved) {
-      setAppointments(JSON.parse(saved));
-    } else {
-      setAppointments([]);
-    }
+    // 這是 Firebase 提供的監聽器，當使用者登入或登出時會自動觸發
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setIsAuthLoading(false);
+      
+      if (currentUser) {
+        // 如果已登入，開始監聽資料庫
+        subscribeToAppointments(currentUser.uid);
+      } else {
+        // 沒登入就清空資料
+        setAppointments([]);
+      }
+    });
 
-    if (savedUser) {
-      setUser(JSON.parse(savedUser));
-    }
+    return () => unsubscribe();
   }, []);
 
-  useEffect(() => {
-    localStorage.setItem('senior_appointments_v11', JSON.stringify(appointments));
-  }, [appointments]);
+  // --- 監聽 Firestore 資料庫 (核心功能：即時同步) ---
+  const subscribeToAppointments = (uid: string) => {
+    setIsDataLoading(true);
+    // 查詢條件：只抓取該使用者的資料 (uid == user.uid)
+    const q = query(
+      collection(db, "appointments"), 
+      where("uid", "==", uid)
+    );
+    
+    // onSnapshot 會建立一個即時連線，資料庫有變動時這裡會自動更新
+    const unsubscribe = onSnapshot(q, (querySnapshot) => {
+      const list: Appointment[] = [];
+      querySnapshot.forEach((doc) => {
+        list.push({ id: doc.id, ...doc.data() } as Appointment);
+      });
+      // 依照日期與時間排序
+      list.sort((a, b) => {
+        return new Date(`${a.date}T${a.time}`).getTime() - new Date(`${b.date}T${b.time}`).getTime();
+      });
+      
+      setAppointments(list);
+      setIsDataLoading(false);
+    }, (error) => {
+      console.error("同步失敗:", error);
+      setIsDataLoading(false);
+    });
 
-  // --- Google 登入模擬功能 ---
-  const handleLogin = () => {
-    setIsLoginLoading(true);
-    setTimeout(() => {
-      const mockUser = {
-        name: '張爺爺',
-        email: 'senior.chang@gmail.com'
-      };
-      setUser(mockUser);
-      localStorage.setItem('senior_user_profile', JSON.stringify(mockUser));
-      setIsLoginLoading(false);
-      speak(`歡迎回來，${mockUser.name}，您的Google日曆已連結`);
-    }, 1500);
+    return unsubscribe;
   };
 
-  const handleLogout = () => {
+  // --- Firebase Google 登入 ---
+  const handleLogin = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+      speak("登入成功，正在為您同步資料");
+    } catch (error) {
+      console.error(error);
+      alert("登入失敗，請檢查網路連線或 Firebase 設定");
+    }
+  };
+
+  const handleLogout = async () => {
     if(confirm("確定要登出嗎？")) {
-      setUser(null);
-      localStorage.removeItem('senior_user_profile');
+      await signOut(auth);
       speak("已登出");
     }
   };
 
-  // --- 語音 ---
+  // --- 語音功能 ---
   const speak = (text: string) => {
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = 'zh-TW';
-      utterance.rate = 0.85; // 再慢一點
+      utterance.rate = 0.85; 
       utterance.volume = 1.0;
       window.speechSynthesis.speak(utterance);
     }
   };
 
-  // --- Google 日曆連結 ---
+  // --- Google 日曆連結 (Web Intent) ---
   const openGoogleCalendar = (appt: Appointment) => {
     const startStr = appt.date.replace(/-/g, '') + 'T' + appt.time.replace(/:/g, '') + '00';
     let endHour = parseInt(appt.time.split(':')[0]) + 1;
     const endStr = appt.date.replace(/-/g, '') + 'T' + String(endHour).padStart(2, '0') + appt.time.split(':')[1] + '00';
     
     const details = user 
-      ? `由樂齡貼身秘書建立 (使用者: ${user.name})`
+      ? `由樂齡貼身秘書建立 (使用者: ${user.displayName})`
       : '由樂齡貼身秘書建立';
 
+    // 這會開啟手機瀏覽器並嘗試喚起已登入的 Google 日曆
     const url = `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(appt.title)}&dates=${startStr}/${endStr}&details=${encodeURIComponent(details)}`;
     window.open(url, '_blank');
   };
 
-  // --- 開啟新增視窗並自動填入現在時間 ---
+  // --- 開啟新增視窗 (自動填入現在時間) ---
   const handleOpenAdd = () => {
+    if (!user) {
+      speak("請先登入才能新增行程喔");
+      // 切換到設定頁面引導登入
+      setView('settings'); 
+      return;
+    }
+
     const now = new Date();
     const year = now.getFullYear();
     const month = String(now.getMonth() + 1).padStart(2, '0');
@@ -153,66 +212,53 @@ export default function App() {
     setShowAddModal(true);
   };
 
-  // --- 備份與還原功能 ---
-  const handleExport = () => {
-    const data = JSON.stringify(appointments);
-    
-    try {
-        const textArea = document.createElement("textarea");
-        textArea.value = data;
-        textArea.style.position = "fixed";
-        textArea.style.left = "-9999px";
-        textArea.style.top = "0";
-        document.body.appendChild(textArea);
-        textArea.focus();
-        textArea.select();
-        const successful = document.execCommand('copy');
-        document.body.removeChild(textArea);
-        
-        if (successful) {
-            setCopySuccess(true);
-            speak("資料已複製，請貼上給新手機");
-            setTimeout(() => setCopySuccess(false), 3000);
-            return;
-        }
-    } catch (err) {
-        console.error("Fallback copy failed", err);
-    }
-
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(data).then(() => {
-            setCopySuccess(true);
-            speak("資料已複製，請貼上給新手機");
-            setTimeout(() => setCopySuccess(false), 3000);
-        }).catch(() => {
-            alert("複製失敗，請嘗試長按選取文字後複製");
-        });
-    } else {
-         alert("複製失敗，您的瀏覽器不支援自動複製");
-    }
-  };
-
-  const handleImport = () => {
-    try {
-      if (!backupString) return;
-      const data = JSON.parse(backupString);
-      if (Array.isArray(data)) {
-        if(confirm("確定要匯入這些資料嗎？目前的資料將會被覆蓋喔。")) {
-            setAppointments(data);
-            speak("資料還原成功");
-            setBackupString('');
-            setShowBackupInput(false);
-            setView('list');
-        }
-      } else {
-        alert("資料格式錯誤");
+  // --- 刪除行程 (從 Firestore 刪除) ---
+  const handleDelete = async (id: string, title: string) => {
+    if (confirm(`確定要刪除「${title}」這個行程嗎？`)) {
+      try {
+        await deleteDoc(doc(db, "appointments", id));
+        speak("行程已刪除");
+      } catch (e) {
+        console.error("刪除失敗: ", e);
+        alert("刪除失敗，請檢查網路");
       }
-    } catch (e) {
-      alert("資料格式錯誤，請確認複製的內容是否完整");
     }
   };
 
-  // --- 日本傳統色配色系統 (高對比版) ---
+  // --- 新增行程 (寫入 Firestore) ---
+  const handleAdd = async () => {
+    if (!newTitle || !newDate || !newTime || !user) {
+      speak("資料不完整喔");
+      return;
+    }
+
+    try {
+      const newAppt = {
+        title: newTitle,
+        date: newDate,
+        time: newTime,
+        type: newType,
+        uid: user.uid, // 綁定使用者的 UID，確保隱私
+        createdAt: Timestamp.now()
+      };
+
+      // 寫入雲端資料庫
+      const docRef = await addDoc(collection(db, "appointments"), newAppt);
+      
+      const apptWithId = { ...newAppt, id: docRef.id } as Appointment;
+      setLastAddedAppt(apptWithId);
+      
+      setShowAddModal(false);
+      setShowSuccessModal(true);
+      setNewTitle('');
+      speak(`新增成功。請問要加入手機日曆提醒嗎？`);
+    } catch (e) {
+      console.error("新增失敗: ", e);
+      alert("儲存失敗，請檢查網路");
+    }
+  };
+
+  // --- UI 輔助功能 ---
   const getCategoryTheme = (type: ApptType) => {
     switch (type) {
       case 'medical': return { border: 'border-[#B7282E]', text: 'text-[#B7282E]', iconBg: 'bg-[#FDE8E9]' };
@@ -255,56 +301,22 @@ export default function App() {
   const todayStr = new Date().toISOString().split('T')[0];
   const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1);
   const tomorrowStr = tomorrow.toISOString().split('T')[0];
-  const nextWeek = new Date(); nextWeek.setDate(nextWeek.getDate() + 7);
   
   const getFilteredAppointments = () => {
-    let sorted = [...appointments].sort((a, b) => {
-      return new Date(`${a.date}T${a.time}`).getTime() - new Date(`${b.date}T${b.time}`).getTime();
-    });
-
     if (filterMode === 'week') {
-      return sorted.filter(a => {
+      return appointments.filter(a => {
         const d = new Date(a.date);
         const t = new Date(todayStr); 
+        const nextWeek = new Date(); nextWeek.setDate(nextWeek.getDate() + 7);
         return d >= t && d <= nextWeek;
       });
     }
-    return sorted;
+    return appointments;
   };
 
   const filteredList = getFilteredAppointments();
   const todayCount = appointments.filter(a => a.date === todayStr).length;
   const tomorrowCount = appointments.filter(a => a.date === tomorrowStr).length;
-
-  const handleAdd = () => {
-    if (!newTitle || !newDate || !newTime) {
-      speak("請把資料填寫完整喔");
-      return;
-    }
-    const newAppt: Appointment = {
-      id: Date.now().toString(),
-      title: newTitle,
-      date: newDate,
-      time: newTime,
-      type: newType
-    };
-    setAppointments([...appointments, newAppt]);
-    setLastAddedAppt(newAppt);
-    setShowAddModal(false);
-    setShowSuccessModal(true);
-    setNewTitle('');
-    setNewDate('');
-    setNewTime('');
-    setNewType('other');
-    speak(`新增成功。請問要加入手機日曆提醒嗎？`);
-  };
-
-  const handleDelete = (id: string, title: string) => {
-    if (confirm(`確定要刪除「${title}」這個行程嗎？`)) {
-      setAppointments(appointments.filter(a => a.id !== id));
-      speak("行程已刪除");
-    }
-  };
 
   const formatDateFriendly = (dateStr: string) => {
     if (dateStr === todayStr) return '今天';
@@ -312,6 +324,16 @@ export default function App() {
     const d = new Date(dateStr);
     return `${d.getMonth() + 1}/${d.getDate()} (${['日','一','二','三','四','五','六'][d.getDay()]})`;
   };
+
+  // --- 載入中畫面 ---
+  if (isAuthLoading) {
+    return (
+      <div className="min-h-screen bg-[#F9F7F2] flex flex-col items-center justify-center space-y-4">
+        <Loader2 size={64} className="animate-spin text-[#C25D48]"/>
+        <p className="text-3xl font-bold text-[#6E6E70]">正在啟動貼身秘書...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#F9F7F2] font-sans text-[#434343] pb-32 relative">
@@ -325,9 +347,9 @@ export default function App() {
             </div>
             
             <div>
-              <h2 className="text-4xl font-bold text-[#434343] mb-4">新增成功！</h2>
+              <h2 className="text-4xl font-bold text-[#434343] mb-4">雲端儲存成功！</h2>
               <p className="text-[#6E6E70] text-2xl">
-                建議加入手機日曆<br/>時間到才會響鈴喔
+                已同步至雲端<br/>點下方按鈕設定手機響鈴
               </p>
             </div>
 
@@ -363,21 +385,17 @@ export default function App() {
           {!user ? (
             <button 
               onClick={handleLogin}
-              disabled={isLoginLoading}
               className="bg-white text-[#C25D48] px-5 py-3 rounded-full font-bold shadow-sm active:bg-gray-100 flex items-center gap-2 transition text-lg"
             >
-              {isLoginLoading ? (
-                 <span>登入中...</span>
-              ) : (
-                 <>
-                   <LogIn size={24} />
-                   <span>登入</span>
-                 </>
-              )}
+              <LogIn size={24} />
+              <span>Google 登入</span>
             </button>
           ) : (
-             <div className="flex items-center gap-2 bg-[#A04D3C] pl-4 pr-2 py-2 rounded-full">
-               <span className="text-lg font-bold truncate max-w-[100px]">{user.name}</span>
+             <div className="flex items-center gap-2 bg-[#A04D3C] pl-4 pr-2 py-2 rounded-full border border-white/20 shadow-inner">
+               {user.photoURL && (
+                 <img src={user.photoURL} alt="User" className="w-8 h-8 rounded-full border border-white"/>
+               )}
+               <span className="text-lg font-bold truncate max-w-[100px]">{user.displayName}</span>
                <button 
                   onClick={handleLogout}
                   className="bg-white text-[#C25D48] p-2 rounded-full hover:bg-gray-100"
@@ -410,81 +428,48 @@ export default function App() {
                </h3>
                {user ? (
                  <div>
-                   <p className="text-[#2792C3] text-2xl font-bold mb-2">已登入：{user.name}</p>
-                   <p className="text-[#2792C3]/80 mb-6 text-xl">{user.email}</p>
-                   <div className="flex items-center gap-2 text-[#007B43] font-bold text-xl">
-                     <CheckCircle size={28} />
-                     Google 日曆連結中
+                   <div className="flex items-center gap-4 mb-4">
+                     {user.photoURL && <img src={user.photoURL} className="w-20 h-20 rounded-full border-4 border-white shadow-md"/>}
+                     <div>
+                        <p className="text-[#2792C3] text-2xl font-bold mb-1">{user.displayName}</p>
+                        <p className="text-[#2792C3]/80 text-xl">{user.email}</p>
+                     </div>
+                   </div>
+                   
+                   <div className="flex items-center gap-2 text-[#007B43] font-bold text-xl bg-white/50 p-4 rounded-xl">
+                     <Cloud size={28} />
+                     雲端同步：已啟用
                    </div>
                  </div>
                ) : (
                  <div>
-                   <p className="text-[#6E6E70] mb-6 text-2xl leading-relaxed">尚未登入，請點擊上方按鈕登入以連結 Google 日曆。</p>
+                   <p className="text-[#6E6E70] mb-6 text-2xl leading-relaxed">
+                     尚未登入。<br/>
+                     登入後可以將行程備份在雲端，換手機也不怕資料遺失。
+                   </p>
                    <button 
                      onClick={handleLogin}
-                     className="bg-[#2792C3] text-white px-8 py-4 rounded-2xl font-bold shadow-md active:scale-95 text-xl w-full"
+                     className="bg-[#2792C3] text-white px-8 py-4 rounded-2xl font-bold shadow-md active:scale-95 text-xl w-full flex justify-center gap-2"
                    >
-                     立即登入
+                     <LogIn size={28} /> 
+                     使用 Google 帳號登入
                    </button>
                  </div>
                )}
             </div>
             
-            <div className="bg-[#FEF8E0] p-8 rounded-3xl border-2 border-[#EFBB24]">
-               <h3 className="text-3xl font-bold text-[#B08600] mb-4 flex items-center gap-3">
-                 <Download size={32}/> 資料移轉
-               </h3>
-               <p className="text-[#6E6E70] leading-relaxed text-2xl mb-6">
-                 換新手機時，請用此功能把資料帶過去。
+            <div className="bg-[#F9F7F2] p-6 rounded-xl border border-[#EBEBEB]">
+               <h3 className="text-xl font-bold text-[#C25D48] mb-3">使用說明</h3>
+               <p className="text-[#6E6E70] leading-relaxed text-lg">
+                 1. 登入 Google 帳號後，您的行程會自動備份到雲端。<br/>
+                 2. 在任何手機登入相同帳號，行程都會自動出現。<br/>
+                 3. 新增行程後，點擊「加入手機日曆提醒」以確保會響鈴。
                </p>
-               
-               <div className="space-y-6">
-                 <button 
-                   onClick={handleExport}
-                   className="w-full py-5 bg-white border-2 border-[#EFBB24] text-[#B08600] rounded-2xl font-bold text-2xl flex items-center justify-center gap-3 active:bg-[#FEF8E0]"
-                 >
-                   {copySuccess ? <Check size={28}/> : <Copy size={28}/>}
-                   {copySuccess ? '已複製！' : '1. 舊手機：複製資料'}
-                 </button>
-                 
-                 {!showBackupInput ? (
-                    <button 
-                      onClick={() => setShowBackupInput(true)}
-                      className="w-full py-5 bg-[#B08600] text-white rounded-2xl font-bold text-2xl flex items-center justify-center gap-3 active:bg-[#8F6D00]"
-                    >
-                      <Upload size={28}/> 2. 新手機：匯入資料
-                    </button>
-                 ) : (
-                   <div className="animate-fade-in bg-white p-6 rounded-2xl border-2 border-[#B08600]">
-                     <p className="text-[#B08600] font-bold mb-4 text-xl">請貼上剛剛複製的資料：</p>
-                     <textarea 
-                       value={backupString}
-                       onChange={(e) => setBackupString(e.target.value)}
-                       className="w-full h-48 p-4 border border-gray-300 rounded-xl mb-4 text-lg"
-                       placeholder='請長按這裡貼上...'
-                     />
-                     <div className="flex gap-4">
-                       <button 
-                         onClick={() => setShowBackupInput(false)}
-                         className="flex-1 py-4 bg-gray-100 text-gray-600 rounded-xl font-bold text-xl"
-                       >
-                         取消
-                       </button>
-                       <button 
-                         onClick={handleImport}
-                         className="flex-1 py-4 bg-[#B08600] text-white rounded-xl font-bold text-xl"
-                       >
-                         確認還原
-                       </button>
-                     </div>
-                   </div>
-                 )}
-               </div>
             </div>
           </div>
         ) : (
           <>
-            {/* --- 概況卡片區 (字體放大) --- */}
+            {/* --- 概況卡片區 --- */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="bg-white rounded-[2rem] p-8 shadow-sm border-l-[12px] border-[#C25D48] relative overflow-hidden">
                 <h2 className="text-2xl text-[#949495] font-bold mb-2">今天行程</h2>
@@ -521,7 +506,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* --- 切換檢視模式 (加大) --- */}
+            {/* --- 切換檢視模式 --- */}
             <div className="flex bg-[#EBEBEB] p-2 rounded-2xl">
               <button 
                 onClick={() => setFilterMode('week')}
@@ -541,9 +526,21 @@ export default function App() {
               </button>
             </div>
 
-            {/* --- 行程列表 (卡片加大、字體加大) --- */}
+            {/* --- 行程列表 --- */}
             <div className="space-y-6">
-              {filteredList.length === 0 ? (
+              {!user && (
+                <div className="bg-[#FEF8E0] p-6 rounded-2xl border-2 border-[#EFBB24] text-[#B08600] text-xl font-bold flex items-center gap-3 shadow-sm">
+                  <Cloud size={32} />
+                  <span>為了保存您的資料，請點擊右上角登入 Google 帳號喔！</span>
+                </div>
+              )}
+
+              {isDataLoading ? (
+                <div className="text-center py-20 text-2xl text-gray-400 flex flex-col items-center gap-4">
+                  <Loader2 size={64} className="animate-spin text-[#C25D48]"/>
+                  正在雲端下載資料...
+                </div>
+              ) : filteredList.length === 0 ? (
                 <div className="text-center py-24 bg-white rounded-[2rem] border-2 border-dashed border-[#D1D1D1]">
                   <p className="text-3xl text-[#949495] font-bold">
                     {filterMode === 'week' ? '最近都沒有行程喔' : '目前沒有任何行程'}
@@ -611,10 +608,11 @@ export default function App() {
         {!showAddModal && view === 'list' && (
           <button 
             onClick={handleOpenAdd}
-            className="pointer-events-auto w-full bg-[#007B43] hover:bg-[#005826] text-white py-6 rounded-3xl shadow-2xl transition transform active:scale-95 flex items-center justify-center gap-3"
+            className={`pointer-events-auto w-full text-white py-6 rounded-3xl shadow-2xl transition transform active:scale-95 flex items-center justify-center gap-3
+              ${user ? 'bg-[#007B43] hover:bg-[#005826]' : 'bg-gray-400 cursor-not-allowed'}`}
           >
             <Plus size={48} />
-            <span className="font-bold text-4xl tracking-widest">新增行程</span>
+            <span className="font-bold text-4xl tracking-widest">{user ? '新增行程' : '請先登入'}</span>
           </button>
         )}
       </div>
