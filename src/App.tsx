@@ -13,10 +13,11 @@ import {
   LogIn,
   LogOut,
   Cloud,
-  Loader2
+  Loader2,
+  AlertTriangle
 } from 'lucide-react';
 
-// --- Firebase SDK 引入 (已合併) ---
+// --- Firebase SDK ---
 import { initializeApp } from "firebase/app";
 import { 
   getAuth, 
@@ -24,7 +25,7 @@ import {
   signInWithPopup, 
   signOut, 
   onAuthStateChanged, 
-  User as FirebaseUser 
+  type User as FirebaseUser // 修正：加上 type 關鍵字
 } from "firebase/auth";
 import { 
   getFirestore,
@@ -49,11 +50,22 @@ const firebaseConfig = {
   appId: "1:953818573188:web:c29950ecb5b6e0075f95d1"
 };
 
-// 初始化 Firebase
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const googleProvider = new GoogleAuthProvider();
-const db = getFirestore(app);
+// --- 自動偵測是否已設定 Firebase ---
+const isConfigured = !firebaseConfig.apiKey.includes("請貼上");
+
+let auth: any, googleProvider: any, db: any;
+
+// 只有在已設定時才初始化 Firebase，避免報錯
+if (isConfigured) {
+  try {
+    const app = initializeApp(firebaseConfig);
+    auth = getAuth(app);
+    googleProvider = new GoogleAuthProvider();
+    db = getFirestore(app);
+  } catch (e) {
+    console.error("Firebase 初始化失敗:", e);
+  }
+}
 
 // --- 定義行程類別 ---
 type ApptType = 
@@ -72,7 +84,7 @@ interface Appointment {
   date: string; // YYYY-MM-DD
   time: string; // HH:MM
   type: ApptType;
-  uid: string;  // 綁定使用者的 ID
+  uid?: string;  // 綁定使用者的 ID
 }
 
 export default function App() {
@@ -83,9 +95,9 @@ export default function App() {
   const [lastAddedAppt, setLastAddedAppt] = useState<Appointment | null>(null);
   
   // 使用者登入狀態
-  const [user, setUser] = useState<FirebaseUser | null>(null);
-  const [isAuthLoading, setIsAuthLoading] = useState(true); // 檢查登入狀態中
-  const [isDataLoading, setIsDataLoading] = useState(false); // 資料下載中
+  const [user, setUser] = useState<FirebaseUser | { displayName: string; email: string; uid: string } | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(true); 
+  const [isDataLoading, setIsDataLoading] = useState(false); 
 
   const [view, setView] = useState<'list' | 'settings'>('list');
   const [filterMode, setFilterMode] = useState<'week' | 'all'>('week');
@@ -95,69 +107,92 @@ export default function App() {
   const [newTime, setNewTime] = useState('');
   const [newType, setNewType] = useState<ApptType>('other');
 
-  // --- 初始化：監聽登入狀態 ---
+  // --- 初始化 ---
   useEffect(() => {
-    // 這是 Firebase 提供的監聽器，當使用者登入或登出時會自動觸發
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-      setIsAuthLoading(false);
+    if (isConfigured && auth) {
+      // === Firebase 模式 ===
+      const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+        setUser(currentUser);
+        setIsAuthLoading(false);
+        if (currentUser) {
+          subscribeToAppointments(currentUser.uid);
+        } else {
+          setAppointments([]);
+        }
+      });
+      return () => unsubscribe();
+    } else {
+      // === 本機試用模式 (Demo Mode) ===
+      // 讀取 LocalStorage
+      const savedUser = localStorage.getItem('demo_user');
+      const savedAppts = localStorage.getItem('demo_appointments');
       
-      if (currentUser) {
-        // 如果已登入，開始監聽資料庫
-        subscribeToAppointments(currentUser.uid);
-      } else {
-        // 沒登入就清空資料
-        setAppointments([]);
-      }
-    });
-
-    return () => unsubscribe();
+      if (savedUser) setUser(JSON.parse(savedUser));
+      if (savedAppts) setAppointments(JSON.parse(savedAppts));
+      
+      setIsAuthLoading(false);
+    }
   }, []);
 
-  // --- 監聽 Firestore 資料庫 (核心功能：即時同步) ---
+  // --- 本機模式存檔 ---
+  useEffect(() => {
+    if (!isConfigured) {
+      localStorage.setItem('demo_appointments', JSON.stringify(appointments));
+    }
+  }, [appointments]);
+
+  // --- 監聽 Firestore 資料庫 ---
   const subscribeToAppointments = (uid: string) => {
+    if (!db) return;
     setIsDataLoading(true);
-    // 查詢條件：只抓取該使用者的資料 (uid == user.uid)
-    const q = query(
-      collection(db, "appointments"), 
-      where("uid", "==", uid)
-    );
+    const q = query(collection(db, "appointments"), where("uid", "==", uid));
     
-    // onSnapshot 會建立一個即時連線，資料庫有變動時這裡會自動更新
     const unsubscribe = onSnapshot(q, (querySnapshot) => {
       const list: Appointment[] = [];
       querySnapshot.forEach((doc) => {
         list.push({ id: doc.id, ...doc.data() } as Appointment);
       });
-      // 依照日期與時間排序
-      list.sort((a, b) => {
-        return new Date(`${a.date}T${a.time}`).getTime() - new Date(`${b.date}T${b.time}`).getTime();
-      });
-      
+      list.sort((a, b) => new Date(`${a.date}T${a.time}`).getTime() - new Date(`${b.date}T${b.time}`).getTime());
       setAppointments(list);
       setIsDataLoading(false);
     }, (error) => {
       console.error("同步失敗:", error);
       setIsDataLoading(false);
     });
-
     return unsubscribe;
   };
 
-  // --- Firebase Google 登入 ---
+  // --- 登入處理 ---
   const handleLogin = async () => {
-    try {
-      await signInWithPopup(auth, googleProvider);
-      speak("登入成功，正在為您同步資料");
-    } catch (error) {
-      console.error(error);
-      alert("登入失敗，請檢查網路連線或 Firebase 設定");
+    if (isConfigured) {
+      try {
+        await signInWithPopup(auth, googleProvider);
+        speak("登入成功，正在同步資料");
+      } catch (error: any) {
+        console.error(error);
+        if (error.code === 'auth/network-request-failed') {
+          alert("連線失敗！請確認：\n1. 網路是否通暢\n2. 您的 Vercel 網址是否已加入 Firebase 的「Authorized Domains」(授權網域) 清單中？");
+        } else {
+          alert(`登入失敗 (${error.code})，請檢查設定`);
+        }
+      }
+    } else {
+      // 試用模式登入模擬
+      const mockUser = { displayName: '測試爺爺', email: 'test@demo.com', uid: 'demo-user' };
+      setUser(mockUser);
+      localStorage.setItem('demo_user', JSON.stringify(mockUser));
+      speak("已切換為試用登入模式");
     }
   };
 
   const handleLogout = async () => {
-    if(confirm("確定要登出嗎？")) {
-      await signOut(auth);
+    if (confirm("確定要登出嗎？")) {
+      if (isConfigured) {
+        await signOut(auth);
+      } else {
+        localStorage.removeItem('demo_user');
+        setUser(null);
+      }
       speak("已登出");
     }
   };
@@ -174,7 +209,7 @@ export default function App() {
     }
   };
 
-  // --- Google 日曆連結 (Web Intent) ---
+  // --- Google 日曆連結 ---
   const openGoogleCalendar = (appt: Appointment) => {
     const startStr = appt.date.replace(/-/g, '') + 'T' + appt.time.replace(/:/g, '') + '00';
     let endHour = parseInt(appt.time.split(':')[0]) + 1;
@@ -184,20 +219,17 @@ export default function App() {
       ? `由樂齡貼身秘書建立 (使用者: ${user.displayName})`
       : '由樂齡貼身秘書建立';
 
-    // 這會開啟手機瀏覽器並嘗試喚起已登入的 Google 日曆
     const url = `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(appt.title)}&dates=${startStr}/${endStr}&details=${encodeURIComponent(details)}`;
     window.open(url, '_blank');
   };
 
-  // --- 開啟新增視窗 (自動填入現在時間) ---
+  // --- 開啟新增視窗 ---
   const handleOpenAdd = () => {
     if (!user) {
       speak("請先登入才能新增行程喔");
-      // 切換到設定頁面引導登入
       setView('settings'); 
       return;
     }
-
     const now = new Date();
     const year = now.getFullYear();
     const month = String(now.getMonth() + 1).padStart(2, '0');
@@ -212,49 +244,63 @@ export default function App() {
     setShowAddModal(true);
   };
 
-  // --- 刪除行程 (從 Firestore 刪除) ---
+  // --- 刪除行程 ---
   const handleDelete = async (id: string, title: string) => {
     if (confirm(`確定要刪除「${title}」這個行程嗎？`)) {
-      try {
-        await deleteDoc(doc(db, "appointments", id));
+      if (isConfigured && user) {
+        try {
+          await deleteDoc(doc(db, "appointments", id));
+          speak("行程已刪除");
+        } catch (e) {
+          alert("刪除失敗，請檢查網路");
+        }
+      } else {
+        setAppointments(prev => prev.filter(a => a.id !== id));
         speak("行程已刪除");
-      } catch (e) {
-        console.error("刪除失敗: ", e);
-        alert("刪除失敗，請檢查網路");
       }
     }
   };
 
-  // --- 新增行程 (寫入 Firestore) ---
+  // --- 新增行程 ---
   const handleAdd = async () => {
     if (!newTitle || !newDate || !newTime || !user) {
       speak("資料不完整喔");
       return;
     }
 
-    try {
-      const newAppt = {
-        title: newTitle,
-        date: newDate,
-        time: newTime,
-        type: newType,
-        uid: user.uid, // 綁定使用者的 UID，確保隱私
-        createdAt: Timestamp.now()
-      };
+    const newAppt = {
+      title: newTitle,
+      date: newDate,
+      time: newTime,
+      type: newType,
+      uid: user.uid,
+    };
 
-      // 寫入雲端資料庫
-      const docRef = await addDoc(collection(db, "appointments"), newAppt);
-      
-      const apptWithId = { ...newAppt, id: docRef.id } as Appointment;
-      setLastAddedAppt(apptWithId);
-      
+    if (isConfigured) {
+      // 雲端模式
+      try {
+        const docRef = await addDoc(collection(db, "appointments"), {
+          ...newAppt,
+          createdAt: Timestamp.now()
+        });
+        setLastAddedAppt({ ...newAppt, id: docRef.id });
+        setShowAddModal(false);
+        setShowSuccessModal(true);
+        setNewTitle('');
+        speak(`新增成功。請問要加入手機日曆提醒嗎？`);
+      } catch (e) {
+        console.error("新增失敗: ", e);
+        alert("儲存失敗，請檢查網路");
+      }
+    } else {
+      // 試用模式
+      const localAppt = { ...newAppt, id: Date.now().toString() };
+      setAppointments([...appointments, localAppt]);
+      setLastAddedAppt(localAppt);
       setShowAddModal(false);
       setShowSuccessModal(true);
       setNewTitle('');
       speak(`新增成功。請問要加入手機日曆提醒嗎？`);
-    } catch (e) {
-      console.error("新增失敗: ", e);
-      alert("儲存失敗，請檢查網路");
     }
   };
 
@@ -338,7 +384,15 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#F9F7F2] font-sans text-[#434343] pb-32 relative">
       
-      {/* --- 成功引導彈窗 (放大版) --- */}
+      {/* --- 未設定 Firebase 的提示條 (Demo Mode) --- */}
+      {!isConfigured && (
+        <div className="bg-[#B7282E] text-white px-4 py-3 text-center text-lg font-bold flex items-center justify-center gap-2">
+          <AlertTriangle size={24} />
+          <span>目前為試用模式 (資料僅存本機)</span>
+        </div>
+      )}
+
+      {/* --- 成功引導彈窗 --- */}
       {showSuccessModal && lastAddedAppt && (
         <div className="fixed inset-0 z-[60] bg-[#434343]/80 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in">
           <div className="bg-white rounded-[2rem] p-8 w-full max-w-lg shadow-2xl flex flex-col items-center text-center space-y-8">
@@ -347,9 +401,12 @@ export default function App() {
             </div>
             
             <div>
-              <h2 className="text-4xl font-bold text-[#434343] mb-4">雲端儲存成功！</h2>
+              <h2 className="text-4xl font-bold text-[#434343] mb-4">
+                {isConfigured ? '雲端儲存成功！' : '新增成功！'}
+              </h2>
               <p className="text-[#6E6E70] text-2xl">
-                已同步至雲端<br/>點下方按鈕設定手機響鈴
+                {isConfigured ? '資料已同步' : '資料已存於本機'}
+                <br/>點下方按鈕設定手機響鈴
               </p>
             </div>
 
@@ -374,7 +431,7 @@ export default function App() {
         </div>
       )}
 
-      {/* --- 頂部導航 (加大) --- */}
+      {/* --- 頂部導航 --- */}
       <header className="bg-[#C25D48] text-white p-6 shadow-md sticky top-0 z-10 flex justify-between items-center">
         <div className="flex items-center gap-3">
           <Calendar size={36} />
@@ -388,11 +445,11 @@ export default function App() {
               className="bg-white text-[#C25D48] px-5 py-3 rounded-full font-bold shadow-sm active:bg-gray-100 flex items-center gap-2 transition text-lg"
             >
               <LogIn size={24} />
-              <span>Google 登入</span>
+              <span>{isConfigured ? 'Google 登入' : '試用登入'}</span>
             </button>
           ) : (
              <div className="flex items-center gap-2 bg-[#A04D3C] pl-4 pr-2 py-2 rounded-full border border-white/20 shadow-inner">
-               {user.photoURL && (
+               {'photoURL' in user && user.photoURL && (
                  <img src={user.photoURL} alt="User" className="w-8 h-8 rounded-full border border-white"/>
                )}
                <span className="text-lg font-bold truncate max-w-[100px]">{user.displayName}</span>
@@ -429,7 +486,9 @@ export default function App() {
                {user ? (
                  <div>
                    <div className="flex items-center gap-4 mb-4">
-                     {user.photoURL && <img src={user.photoURL} className="w-20 h-20 rounded-full border-4 border-white shadow-md"/>}
+                     {'photoURL' in user && user.photoURL && (
+                       <img src={user.photoURL} className="w-20 h-20 rounded-full border-4 border-white shadow-md"/>
+                     )}
                      <div>
                         <p className="text-[#2792C3] text-2xl font-bold mb-1">{user.displayName}</p>
                         <p className="text-[#2792C3]/80 text-xl">{user.email}</p>
@@ -438,33 +497,42 @@ export default function App() {
                    
                    <div className="flex items-center gap-2 text-[#007B43] font-bold text-xl bg-white/50 p-4 rounded-xl">
                      <Cloud size={28} />
-                     雲端同步：已啟用
+                     {isConfigured ? '雲端同步：已啟用' : '目前為本機試用模式'}
                    </div>
                  </div>
                ) : (
                  <div>
                    <p className="text-[#6E6E70] mb-6 text-2xl leading-relaxed">
                      尚未登入。<br/>
-                     登入後可以將行程備份在雲端，換手機也不怕資料遺失。
+                     {isConfigured 
+                       ? '登入後可將行程備份在雲端，換手機也不怕資料遺失。' 
+                       : '請在程式碼中填入 Firebase 金鑰以啟用雲端備份功能。'}
                    </p>
                    <button 
                      onClick={handleLogin}
                      className="bg-[#2792C3] text-white px-8 py-4 rounded-2xl font-bold shadow-md active:scale-95 text-xl w-full flex justify-center gap-2"
                    >
                      <LogIn size={28} /> 
-                     使用 Google 帳號登入
+                     {isConfigured ? '使用 Google 帳號登入' : '試用登入 (不儲存雲端)'}
                    </button>
                  </div>
                )}
             </div>
             
             <div className="bg-[#F9F7F2] p-6 rounded-xl border border-[#EBEBEB]">
-               <h3 className="text-xl font-bold text-[#C25D48] mb-3">使用說明</h3>
-               <p className="text-[#6E6E70] leading-relaxed text-lg">
-                 1. 登入 Google 帳號後，您的行程會自動備份到雲端。<br/>
-                 2. 在任何手機登入相同帳號，行程都會自動出現。<br/>
-                 3. 新增行程後，點擊「加入手機日曆提醒」以確保會響鈴。
-               </p>
+               <h3 className="text-xl font-bold text-[#C25D48] mb-3">設定說明</h3>
+               {!isConfigured ? (
+                 <div className="text-[#B7282E] font-bold text-lg mb-2">
+                   ⚠️ 尚未設定 Firebase 金鑰
+                   <p className="font-normal text-[#6E6E70] mt-1">
+                     請開啟 <code>src/App.tsx</code> 檔案，將您的 <code>firebaseConfig</code> 填入，即可啟用 Google 登入與雲端同步功能。
+                   </p>
+                 </div>
+               ) : (
+                 <p className="text-[#6E6E70] leading-relaxed text-lg">
+                   Google 日曆連結是透過手機內建功能開啟，App 不會儲存您的 Google 密碼。
+                 </p>
+               )}
             </div>
           </div>
         ) : (
@@ -531,7 +599,7 @@ export default function App() {
               {!user && (
                 <div className="bg-[#FEF8E0] p-6 rounded-2xl border-2 border-[#EFBB24] text-[#B08600] text-xl font-bold flex items-center gap-3 shadow-sm">
                   <Cloud size={32} />
-                  <span>為了保存您的資料，請點擊右上角登入 Google 帳號喔！</span>
+                  <span>為了保存您的資料，請點擊右上角登入{isConfigured ? ' Google 帳號' : ''}喔！</span>
                 </div>
               )}
 
